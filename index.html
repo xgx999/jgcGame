@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <title>贾嘎村修仙录</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="title">贾嘎村修仙录</div>
+        <div class="subtitle">纯文字 · 手机可玩 · 80+结局</div>
+      </div>
+      <div class="top-actions">
+        <button id="btnSave" class="btn ghost">保存</button>
+        <button id="btnReset" class="btn danger">重开</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card status">
+        <div class="card-title">角色</div>
+        <div id="status" class="status-grid"></div>
+      </section>
+
+      <section class="card log">
+        <div class="card-title">行记</div>
+        <div id="log" class="log-box" role="log" aria-live="polite"></div>
+      </section>
+
+      <section class="card actions">
+        <div class="card-title">选择</div>
+        <div id="actions" class="actions-grid"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="hint">提示：点“保存”可在同一浏览器继续；点“收束道途”进入结局。</div>
+    </footer>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+
