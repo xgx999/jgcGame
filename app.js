@@ -9,6 +9,8 @@ const ITEMS = {
   ore_myst: { key:"ore_myst", name:"幽冥晶矿", kind:"material", rarity:3, price:180, power:0 },
   herb_qing:{ key:"herb_qing",name:"青灵草", kind:"material", rarity:1, price:25, power:0 },
   herb_xuan:{ key:"herb_xuan",name:"玄息花", kind:"material", rarity:2, price:80, power:0 },
+  spirit_rice:{ key:"spirit_rice", name:"灵米", kind:"consumable", rarity:1, price:18, power:0 },
+  talisman_flee:{ key:"talisman_flee", name:"遁行符", kind:"consumable", rarity:2, price:95, power:0 },
   pill_qi:  { key:"pill_qi",  name:"回气丹", kind:"pill", rarity:1, price:60, power:0 },
   pill_jing:{ key:"pill_jing",name:"凝神丹", kind:"pill", rarity:2, price:160,power:0 },
   w_sword:  { key:"w_sword",  name:"青锋剑", kind:"equip", rarity:1, price:120, slot:"武器", power:3 },
@@ -61,7 +63,7 @@ function baseState(){
   const attrs = Object.fromEntries(ATTRS.map(k=>[k,0]));
   const equip = Object.fromEntries(EQUIPMENT_SLOTS.map(k=>[k,null]));
   return {
-    v: 1,
+    v: 2,
     screen: "intro",
     p: {
       name: "",
@@ -85,6 +87,9 @@ function baseState(){
       fame: 0,
       karma: 0,
       flags: [],
+      eventBonus: 0,
+      damageHalve: false,
+      favor: 0,
     },
   };
 }
@@ -106,11 +111,56 @@ function addInv(k, n){
 }
 
 function realm(){ return REALMS[state.p.realmIdx]; }
-function maxHP(){ return 10 + state.p.realmIdx*2; }
-function maxMP(){ return 10 + state.p.realmIdx*2; }
+function maxHP(){ return 10 + state.p.realmIdx*2 + (state.p.cave ?? 0); }
+function maxMP(){ return 10 + state.p.realmIdx*2 + Math.min(3, state.p.vein ?? 0); }
+function healHpMp(hp=0, mp=0){
+  if(hp) state.p.hp = Math.min(maxHP(), state.p.hp + hp);
+  if(mp) state.p.mp = Math.min(maxMP(), state.p.mp + mp);
+}
 function healRest(){
-  state.p.hp = Math.min(maxHP(), state.p.hp + 6);
-  state.p.mp = Math.min(maxMP(), state.p.mp + 6);
+  healHpMp(6, 6);
+}
+function takeEventBonus(){
+  const b = state.p.eventBonus ?? 0;
+  state.p.eventBonus = 0;
+  return b;
+}
+function materialPassive(ctx){
+  let s = 0;
+  const p = state.p;
+  if(["dungeon","tower","ruins"].includes(ctx)){
+    if(invQty("ore_iron") >= 3) s += 2;
+    if(invQty("ore_myst") >= 1) s += 1;
+    if(invQty("herb_qing") >= 5) s += 1;
+  }
+  if(ctx === "daily"){
+    if(invQty("herb_qing") >= 2) s += 1;
+    if(invQty("spirit_rice") >= 1) s += 1;
+  }
+  if(ctx === "ruins"){
+    if(invQty("t_charm") >= 1 && p.equip["饰品"] !== "t_charm") s += 1;
+    if(invQty("pill_jing") >= 1) s += 1;
+  }
+  if(ctx === "tower"){
+    if(invQty("f_orb") >= 1 && p.equip["法器"] !== "f_orb") s += 1;
+  }
+  if(ctx === "mine"){
+    if(invQty("ore_iron") >= 1) s += 1;
+  }
+  if(ctx === "alchemy"){
+    if(invQty("herb_xuan") >= 2) s += 1;
+  }
+  if(ctx === "breakthrough"){
+    if(invQty("ore_myst") >= 1) s += 1;
+  }
+  return s;
+}
+function applyDamage(amt){
+  let a = Math.max(0, amt);
+  if(state.p.damageHalve){ a = Math.floor(a/2); state.p.damageHalve = false; }
+  state.p.hp -= a;
+  if(state.p.hp < 0) state.p.hp = 0;
+  return state.p.hp <= 0;
 }
 
 function equipPower(){
@@ -150,7 +200,22 @@ function realmBandName(i){
   return "尊位临世";
 }
 
-function ending(){
+function ending(dead=false){
+  if(dead){
+    const sect = state.p.sect;
+    const path = choosePath();
+    const key = `${realmBandName(state.p.realmIdx)}|${sect}|${state.p.bond}|${path}|${state.p.mentor}`;
+    return {
+      title: `【陨落】${state.p.name} · ${realm()}`,
+      lines: [
+        "你在劫数中气血断绝，道途戛然而止。",
+        `最后境界：${realm()}；立场：${SECTS[sect].name}（${sect}）；累计：第${state.p.day}天。`,
+        `村望：${state.p.favor ?? 0}；名望：${state.p.fame}。`,
+        `（陨落支线关键词：${key}）`,
+      ],
+      key,
+    };
+  }
   const rb = realmBandName(state.p.realmIdx);
   const sect = state.p.sect;
   const bond = state.p.bond;
@@ -200,6 +265,7 @@ function breakthrough(){
   base += a["灵根"]*0.02 + a["智力"]*0.015 + a["幸运"]*0.01;
   base -= state.p.realmIdx*0.015;
   base += state.p.vein*0.01 + state.p.cave*0.01;
+  base += materialPassive("breakthrough") * 0.01;
   if(invQty("pill_jing") >= 1) base += 0.04;
   if(state.p.sect === "魔道") base += 0.02;
   if(flags().has("ruins_core")) base += 0.03;
@@ -209,10 +275,12 @@ function breakthrough(){
     state.p.realmIdx += 1;
     state.p.fame += 1 + Math.floor(state.p.realmIdx/3);
     if(state.p.sect === "正道") state.p.karma = clamp(state.p.karma + 1, -100, 100);
+    state.p.hp = Math.min(maxHP(), state.p.hp + 1);
     return { ok:true, msg:`你运转周天，灵海翻涌——突破成功！当前境界：${realm()}。` };
   }
-  state.p.hp = Math.max(1, state.p.hp - 3);
+  const dead = applyDamage(3);
   state.p.mp = Math.max(0, state.p.mp - 2);
+  if(dead) return { ok:false, msg:"冲关失败，逆流冲心……你当场陨落。" };
   return { ok:false, msg:`灵机不顺，冲关受挫。你气血翻涌（HP-3/MP-2）。成功率约 ${Math.floor(ch*100)}%。` };
 }
 
@@ -242,6 +310,7 @@ function renderStatus(){
     <div class="kv"><div class="k">HP / MP</div><div class="v">${p.hp}/${maxHP()} · ${p.mp}/${maxMP()}</div></div>
     <div class="kv"><div class="k">门派</div><div class="v">${escapeHtml(sect)}（${escapeHtml(p.sect)}）</div></div>
     <div class="kv"><div class="k">名望 / 因果</div><div class="v">${p.fame} / ${p.karma}</div></div>
+    <div class="kv"><div class="k">村望 / 判定+</div><div class="v">${p.favor ?? 0} / ${p.eventBonus ?? 0}</div></div>
     <div class="kv"><div class="k">洞府 / 灵脉</div><div class="v">${p.cave} / ${p.vein}</div></div>
     <div class="kv"><div class="k">通天塔</div><div class="v">${p.tower}层</div></div>
     <div class="kv"><div class="k">背包</div><div class="v">${invCount}件</div></div>
@@ -310,6 +379,8 @@ function renderActions(){
         if(k === "正道") state.p.karma += 10;
         if(k === "魔道") state.p.karma -= 10;
         if(k === "商盟") state.p.fame += 3;
+        state.p.hp = maxHP();
+        state.p.mp = maxMP();
         state.screen = "main";
         logLine(`你选择了立场：${s.name}（${k}）。`, "warn");
         render();
@@ -337,7 +408,16 @@ function renderActions(){
     ["拍卖会", () => doAuction(), "btn primary"],
     ["结缘 / 师徒 / 门派", () => doRelations(), "btn primary"],
     ["装备管理", () => doEquip(), "btn"],
-    ["尝试突破", () => { state.p.mp = Math.max(0, state.p.mp - 2); const r = breakthrough(); logLine(r.msg, r.ok?"good":"bad"); state.p.day += 1; render(); }, "btn good"],
+    ["背包（查看/使用）", () => doBackpack(), "btn"],
+    ["人物 / NPC", () => doNpcHub(), "btn"],
+    ["尝试突破", () => {
+      state.p.mp = Math.max(0, state.p.mp - 2);
+      const r = breakthrough();
+      logLine(r.msg, r.ok?"good":"bad");
+      state.p.day += 1;
+      if(state.p.hp <= 0) doEnding(true);
+      else render();
+    }, "btn good"],
     ["收束道途（结局）", () => doEnding(), "btn danger"],
   ];
   for(const [t, fn, cls] of actions){
@@ -364,7 +444,117 @@ function endDay(){
   if(state.p.hp <= 0){
     logLine("你气血枯竭，道途止步。", "bad");
     doEnding(true);
+    return;
   }
+  render();
+}
+
+function useConsumableKey(key){
+  if(invQty(key) < 1 || !ITEMS[key]) return "物品不足。";
+  if(key === "pill_qi"){
+    addInv(key,-1); healHpMp(5,4); state.p.eventBonus = (state.p.eventBonus ?? 0) + 1;
+    return "回气丹化开，气韵流转，下次判定+1。";
+  }
+  if(key === "pill_jing"){
+    addInv(key,-1); healHpMp(2,8); state.p.eventBonus = (state.p.eventBonus ?? 0) + 2;
+    return "凝神丹让你灵台一清，下次判定+2。";
+  }
+  if(key === "herb_qing"){
+    addInv(key,-1); healHpMp(3,1);
+    return "青灵草嚼服，伤势稍缓。";
+  }
+  if(key === "herb_xuan"){
+    addInv(key,-1); healHpMp(1,5);
+    const s = flags();
+    if(s.has("heart_demon")){
+      s.delete("heart_demon");
+      state.p.flags = [...s];
+      return "玄息花清香入心，心魔阴影退去。";
+    }
+    return "玄息花让你神思清明。";
+  }
+  if(key === "spirit_rice"){
+    addInv(key,-1); healHpMp(4,3); state.p.favor = Math.min(100, (state.p.favor ?? 0) + 1);
+    return "灵米下肚，血气渐稳，村望微涨。";
+  }
+  if(key === "talisman_flee"){
+    addInv(key,-1); state.p.damageHalve = true;
+    return "遁行符已扣在手中，下次受伤减半。";
+  }
+  return "此物无法直接使用。";
+}
+
+function doBackpack(){
+  const lines = Object.keys(state.p.inv).filter(k=>invQty(k)>0).sort().map(k=>{
+    const it = ITEMS[k]; const n = invQty(k);
+    return `${it?.name ?? k} x${n} (${it?.kind ?? "?"})`;
+  }).join("\n");
+  const usable = Object.keys(state.p.inv).filter(k=>{
+    const it = ITEMS[k]; if(!it || invQty(k)<1) return false;
+    if(it.kind === "pill" || it.kind === "consumable") return true;
+    if(it.kind === "material" && ["herb_qing","herb_xuan","spirit_rice"].includes(k)) return true;
+    return false;
+  }).sort();
+  if(!usable.length){
+    alert(`背包：\n${lines || "空"}\n\n暂无可直接使用物品。`);
+    return;
+  }
+  const menu = usable.map((k,i)=>`${i+1}. 使用 ${ITEMS[k].name}`).join("\n");
+  const s = prompt(`背包（村望${state.p.favor ?? 0} 判定+储备${state.p.eventBonus ?? 0}）\n\n${lines}\n\n${menu}\n0 取消`) ?? "";
+  const n = Number(s);
+  if(!(n>=1 && n<=usable.length)) return;
+  logLine(useConsumableKey(usable[n-1]), "good");
+  render();
+}
+
+function doNpcHub(){
+  const sectName = SECTS[state.p.sect]?.name ?? "";
+  const menu = [
+    `1. 村长贾老实`,
+    `2. 猎户石大山`,
+    `3. 郎中叶百草`,
+    `4. 行商金不换`,
+    `5. 说书人（25灵石）`,
+    `6. 拜见执事（${sectName}）`,
+    `0. 返回`,
+  ].join("\n");
+  const s = prompt(`人物 / NPC\n\n${menu}`) ?? "";
+  const idx = Number(s);
+  if(idx === 1){
+    const r = Number(prompt("贾老实：\n1 巡夜\n2 打听灵脉(30灵石)\n3 用灵米慰问（需灵米）\n0 取消") ?? "");
+    if(r===1){ state.p.mp = Math.max(0,state.p.mp-1); state.p.stone += 40 + Math.floor((state.p.favor ?? 0)/5); state.p.favor = Math.min(100,(state.p.favor ?? 0)+6); state.p.karma = Math.min(100,state.p.karma+2); logLine("村民谢你巡夜。", "good"); }
+    else if(r===2){ if(state.p.stone<30) logLine("灵石不够。", "bad"); else { state.p.stone -= 30; state.p.eventBonus = (state.p.eventBonus ?? 0) + 2; setFlag("npc_intel_vein"); logLine("得到灵脉线索，下次判定+2。", "warn"); } }
+    else if(r===3){ if(invQty("spirit_rice")<1) logLine("没有灵米。", "bad"); else { addInv("spirit_rice",-1); state.p.favor = Math.min(100,(state.p.favor ?? 0)+10); state.p.karma = Math.min(100,state.p.karma+4); logLine("孤寡眼底有了光。", "good"); } }
+  }else if(idx===2){
+    const r = Number(prompt("石大山：\n1 弱点情报(50灵石或1玄铁)\n2 小道消息(10灵石,+1判定)\n0 取消") ?? "");
+    if(r===1){ if(state.p.stone>=50) state.p.stone -= 50; else if(invQty("ore_iron")>=1) addInv("ore_iron",-1); else { logLine("钱矿都没有。", "bad"); state.p.day++; render(); return; } state.p.eventBonus = (state.p.eventBonus ?? 0) + 3; setFlag("npc_dungeon_hint"); logLine("副本陷阱烂熟于心，下次判定+3。", "good"); }
+    else if(r===2){ if(state.p.stone<10) logLine("灵石不够。", "bad"); else { state.p.stone -= 10; state.p.eventBonus = (state.p.eventBonus ?? 0) + 1; logLine("猎人嘟囔几个地名。", "good"); } }
+  }else if(idx===3){
+    const r = Number(prompt("叶百草：\n1 调理(30灵石)\n2 玄息花换偏方（耗1花,+1判定）\n0 取消") ?? "");
+    if(r===1){ if(state.p.stone<30) logLine("诊金不够。", "bad"); else { state.p.stone -= 30; healHpMp(5,3); state.p.favor = Math.min(100,(state.p.favor ?? 0)+4); logLine("针灸后胸臆通畅。", "good"); } }
+    else if(r===2){ if(invQty("herb_xuan")<1) logLine("没有玄息花。", "bad"); else { addInv("herb_xuan",-1); state.p.eventBonus = (state.p.eventBonus ?? 0) + 1; setFlag("npc_herb_bless"); logLine("得丹方残页护心。", "good"); } }
+  }else if(idx===4){
+    const r = Number(prompt("金不换：\n1 赊人情(名望≥3,+50灵石,-2因果)\n2 打听底价（后几笔交易略便宜）\n0 取消") ?? "");
+    if(r===1){
+      if(state.p.fame < 3) logLine("你太无名。", "bad");
+      else { state.p.stone += 50; state.p.karma = Math.max(-100, state.p.karma - 2); setFlag("npc_debt"); logLine("按下人情印。", "warn"); }
+    } else if(r===2){
+      setFlag("npc_trade_tip"); logLine("低声报了后门价。", "warn");
+    }
+  }else if(idx===5){
+    if(state.p.stone < 25) logLine("灵石不够听说书。", "bad");
+    else { state.p.stone -= 25; const roll = rint(1,4);
+      if(roll===1){ setFlag("ruins_map"); logLine("听到遗迹将出世。", "warn"); }
+      else if(roll===2){ state.p.fame += 1; logLine("有人认出你。", "good"); }
+      else if(roll===3){ state.p.eventBonus = (state.p.eventBonus ?? 0) + 2; logLine("故事里藏步法。", "good"); }
+      else { state.p.stone += 15; logLine("捡了袋灵石。", "good"); }
+    }
+  }else if(idx===6){
+    const r = Number(prompt(`拜见${sectName}执事：\n1 点拨(20灵石,+1判定)\n2 供奉(10灵石,+1名望)\n0 取消`) ?? "");
+    if(r===1){ if(state.p.stone<20) logLine("供奉不够。", "bad"); else { state.p.stone -= 20; state.p.eventBonus = (state.p.eventBonus ?? 0) + 1; if(state.p.sect==="正道") state.p.karma = Math.min(100,state.p.karma+1); if(state.p.sect==="魔道") state.p.karma = Math.max(-100,state.p.karma-1); logLine("眉心一指点窍。", "good"); } }
+    else if(r===2){ if(state.p.stone<10) logLine("灵石不够。", "bad"); else { state.p.stone -= 10; state.p.fame += 1; logLine("礼多人不怪。", "good"); } }
+  }else return;
+  state.p.day += 1;
   render();
 }
 
@@ -389,7 +579,7 @@ function doDaily(){
     endDay();
     return;
   }
-  const score = powerScore() + state.p.attrs["魅力"] + state.p.attrs["幸运"] + rint(0,20);
+  const score = powerScore() + state.p.attrs["魅力"] + state.p.attrs["幸运"] + takeEventBonus() + materialPassive("daily") + rint(0,20);
   const diff = 18 + state.p.realmIdx*2;
   const ok = score >= diff;
   if(ok){
@@ -402,10 +592,11 @@ function doDaily(){
     }
     logLine(`你完成了【${t.name}】，收获颇丰。`, "good");
   }else{
-    state.p.hp = Math.max(1, state.p.hp - 2);
+    applyDamage(2);
     state.p.mp = Math.max(0, state.p.mp - 1);
     state.p.fame = Math.max(0, state.p.fame - 1);
     logLine(`你在【${t.name}】中受挫而归（HP-2/MP-1，名望-1）。`, "bad");
+    if(state.p.hp <= 0) logLine("伤势失控，未能回到村口。", "bad");
   }
   endDay();
 }
@@ -430,7 +621,7 @@ function doDungeon(){
     else if(state.p.bond === "孽缘"){ bonus -= 2; setFlag("bad_bond_fight"); }
     else logLine("你尚未结缘，只能独自前往。", "warn");
   }
-  const score = powerScore() + bonus + rint(0,10);
+  const score = powerScore() + bonus + takeEventBonus() + materialPassive("dungeon") + rint(0,10);
   const diff = 22 + state.p.realmIdx*2;
   const ok = score >= diff;
   if(ok){
@@ -440,22 +631,24 @@ function doDungeon(){
     if(chance(0.25 + state.p.attrs["幸运"]*0.01)){ addInv("ore_myst", 1); setFlag("myst_ore_found"); }
     if(chance(0.12)) setFlag("ruins_map");
     state.p.fame += 2;
-    state.p.hp = Math.max(1, state.p.hp - 1);
-    logLine(`你横推副本，灵石+${gain}，并带回矿材。`, "good");
+    applyDamage(1);
+    logLine(`你横推副本，灵石+${gain}，并带回矿材（仍难免擦伤）。`, "good");
   }else{
-    state.p.hp = Math.max(1, state.p.hp - 4);
+    applyDamage(4);
     state.p.mp = Math.max(0, state.p.mp - 3);
     if(chance(0.30)) setFlag("heart_demon");
     logLine("你在副本中被围困，侥幸脱身（HP-4/MP-3）。", "bad");
+    if(state.p.hp <= 0) logLine("撤离不及，倒在乱石之间……", "bad");
   }
   endDay();
 }
 
 function doTrade(){
-  const market = ["ore_iron","ore_myst","herb_qing","herb_xuan","pill_qi","pill_jing","w_sword","a_robe","t_charm","f_orb"];
+  const market = ["ore_iron","ore_myst","herb_qing","herb_xuan","spirit_rice","talisman_flee","pill_qi","pill_jing","w_sword","a_robe","t_charm","f_orb"];
   const list = market.map((k,i)=>{
     const it = ITEMS[k];
-    const price = Math.floor(it.price*(0.85 + Math.random()*0.5));
+    let price = Math.floor(it.price*(0.85 + Math.random()*0.5));
+    if(flags().has("npc_trade_tip")) price = Math.floor(price * 0.92);
     return `${i+1}. 买 ${it.name}（${it.kind} 稀有${it.rarity}）- ${price}灵石`;
   }).join("\n");
   const extra = [
@@ -468,7 +661,8 @@ function doTrade(){
   if(idx <= market.length){
     const k = market[idx-1];
     const it = ITEMS[k];
-    const price = Math.floor(it.price*(0.85 + Math.random()*0.5));
+    let price = Math.floor(it.price*(0.85 + Math.random()*0.5));
+    if(flags().has("npc_trade_tip")) price = Math.floor(price * 0.92);
     if(state.p.stone < price){ logLine("灵石不足。", "bad"); return; }
     state.p.stone -= price;
     addInv(k, 1);
@@ -503,12 +697,14 @@ function doMineForge(){
   const idx = Number(s);
   if(!(idx>=1 && idx<=3)) return;
   if(idx === 1){
-    const gainIron = 1 + rint(0,3) + (state.p.vein >= 2 ? 1 : 0);
+    let gainIron = 1 + rint(0,3) + (state.p.vein >= 2 ? 1 : 0);
+    gainIron += Math.floor(materialPassive("mine") / 2);
     addInv("ore_iron", gainIron);
     if(chance(0.18 + state.p.attrs["幸运"]*0.01)) addInv("ore_myst", 1);
-    state.p.hp = Math.max(1, state.p.hp - 1);
+    applyDamage(1);
     state.p.mp = Math.max(0, state.p.mp - 1);
     logLine(`你挖得玄铁矿 x${gainIron}。`, "good");
+    if(state.p.hp <= 0) logLine("矿脉塌方，再未爬出……", "bad");
     endDay();
     return;
   }
@@ -517,7 +713,7 @@ function doMineForge(){
     const useMyst = invQty("ore_myst") >= 1 && confirm("是否加入幽冥晶矿提升品质？（确定=加入）");
     addInv("ore_iron", -2);
     if(useMyst) addInv("ore_myst", -1);
-    const craftScore = state.p.attrs["智力"] + state.p.attrs["灵根"] + (state.p.sect==="商盟"?2:0);
+    const craftScore = state.p.attrs["智力"] + state.p.attrs["灵根"] + (state.p.sect==="商盟"?2:0) + materialPassive("alchemy");
     let p = 0.45 + craftScore*0.02 + (useMyst?0.08:0);
     p = Math.min(0.85, p);
     const ok = chance(p);
@@ -528,8 +724,9 @@ function doMineForge(){
       setFlag("crafted_once");
       logLine(`炉火如龙，你炼出了一件【${ITEMS[key].name}】！`, "good");
     }else{
-      state.p.hp = Math.max(1, state.p.hp - 2);
+      applyDamage(2);
       logLine("火候失衡，炼器失败（HP-2）。", "bad");
+      if(state.p.hp <= 0) logLine("反噬过猛，倒在炉前。", "bad");
     }
     endDay();
   }
@@ -566,7 +763,7 @@ function doHerbAlchemy(){
       addInv("herb_xuan", -1);
       key = "pill_jing"; diff = 22;
     }
-    const score = state.p.attrs["智力"]*2 + state.p.attrs["灵根"] + state.p.attrs["幸运"] + rint(0,12);
+    const score = state.p.attrs["智力"]*2 + state.p.attrs["灵根"] + state.p.attrs["幸运"] + materialPassive("alchemy") + rint(0,12);
     const ok = score >= diff;
     if(ok){
       addInv(key, 1);
@@ -574,8 +771,9 @@ function doHerbAlchemy(){
       setFlag("alchem_once");
       logLine(`丹香四溢，你炼成【${ITEMS[key].name}】。`, "good");
     }else{
-      state.p.hp = Math.max(1, state.p.hp - 2);
+      applyDamage(2);
       logLine("丹炉炸响，炼丹失败（HP-2）。", "bad");
+      if(state.p.hp <= 0) logLine("丹火噬身，未能走出丹室。", "bad");
     }
     endDay();
   }
@@ -614,6 +812,7 @@ function doCaveVein(){
   if(idx === 3){
     const r = breakthrough();
     logLine(r.msg, r.ok ? "good":"bad");
+    if(state.p.hp <= 0){ doEnding(true); return; }
     endDay();
   }
 }
@@ -624,7 +823,7 @@ function doRuins(){
   const s = prompt(`遗迹探寻：${theme}\n\n${menu}`) ?? "";
   const idx = Number(s);
   if(!(idx>=1 && idx<=5) || idx===5) { endDay(); return; }
-  let score = powerScore() + rint(0,12);
+  let score = powerScore() + takeEventBonus() + materialPassive("ruins") + rint(0,12);
   let risk = 18 + state.p.realmIdx*2;
   if(idx === 2){ risk += 6; score += 3; }
   if(idx === 1){ risk -= 2; }
@@ -638,9 +837,10 @@ function doRuins(){
     state.p.fame += 2;
     logLine("你在遗迹中得了机缘与宝物。", "good");
   }else{
-    state.p.hp = Math.max(1, state.p.hp - 3);
+    applyDamage(3);
     if(chance(0.35)) setFlag("heart_demon");
     logLine("遗迹禁制反噬，你狼狈逃出（HP-3）。", "bad");
+    if(state.p.hp <= 0) logLine("禁制碾碎生机……", "bad");
   }
   endDay();
 }
@@ -651,7 +851,7 @@ function doTower(){
   const s = prompt(`通天塔：挑战第${target}层（当前记录${state.p.tower}）\n\n${menu}`) ?? "";
   const idx = Number(s);
   if(!(idx>=1 && idx<=4) || idx===4) return;
-  let score = powerScore() + rint(0,10);
+  let score = powerScore() + takeEventBonus() + materialPassive("tower") + rint(0,10);
   if(idx === 2) score += state.p.attrs["智力"] + (state.p.sect==="正道"?2:0);
   if(idx === 3) score += state.p.attrs["幸运"]*2;
   const diff = 20 + target*2 + state.p.realmIdx;
@@ -663,9 +863,10 @@ function doTower(){
     if([5,10,15,20].includes(state.p.tower)) state.p.jade += 1;
     logLine(`你破了第${target}层，名望更盛。`, "good");
   }else{
-    state.p.hp = Math.max(1, state.p.hp - 2);
+    applyDamage(2);
     state.p.mp = Math.max(0, state.p.mp - 2);
     logLine("你被塔灵击退（HP-2/MP-2）。", "bad");
+    if(state.p.hp <= 0) logLine("塔劫临身，道消于此层。", "bad");
   }
   endDay();
 }
@@ -747,7 +948,7 @@ function doRelations(){
       if(t === 2){
         setFlag("mentor_break");
         if(chance(0.5)){ state.p.fame += 1; logLine("你果断切割，反而得几分清名。", "good"); }
-        else { state.p.hp=Math.max(1,state.p.hp-2); state.p.fame=Math.max(0,state.p.fame-2); logLine("你被旧缘反噬（HP-2，名望-2）。", "bad"); }
+        else { applyDamage(2); state.p.fame=Math.max(0,state.p.fame-2); logLine("你被旧缘反噬（HP-2，名望-2）。", "bad"); if(state.p.hp<=0) logLine("旧缘成劫……", "bad"); }
       }
     }
     endDay(); return;
@@ -797,7 +998,7 @@ function doEquip(){
 }
 
 function doEnding(fromDeath=false){
-  const e = ending();
+  const e = ending(fromDeath);
   state.screen = "ending";
   logLine(fromDeath ? "你的道途被迫收束。":"你选择收束道途，回望来时路。", "warn");
   logLine(e.title, "warn");
@@ -819,7 +1020,13 @@ function load(){
     if(!s) return null;
     const obj = JSON.parse(s);
     if(!obj || typeof obj !== "object") return null;
-    if(obj.v !== 1) return null;
+    if(obj.v === 1){
+      obj.v = 2;
+      obj.p.eventBonus = obj.p.eventBonus ?? 0;
+      obj.p.damageHalve = obj.p.damageHalve ?? false;
+      obj.p.favor = obj.p.favor ?? 0;
+    }
+    if(obj.v !== 2) return null;
     return obj;
   }catch{
     return null;
